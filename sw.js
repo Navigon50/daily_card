@@ -1,4 +1,4 @@
-const CACHE = 'daily-card-v1';
+const CACHE = 'daily-card-v2';  // was v1;
 const ASSETS = [
   '/',
   '/index.html',
