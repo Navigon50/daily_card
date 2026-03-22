@@ -774,7 +774,7 @@ function openEdit() {
   setChip('os', d.os);
   setChip('leisure', d.leisure);
   document.getElementById('edit-task-list').innerHTML = '';
-  (d.tasks || []).forEach(t => addEditTask(t));
+  (d.tasks || []).forEach(t => addEditTask(typeof t === 'object' ? t.text : t));
   document.getElementById('edit-panel').classList.add('open');
 }
 
