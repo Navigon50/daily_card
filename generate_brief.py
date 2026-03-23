@@ -39,7 +39,7 @@ DEFAULT_PROCESSED_FOLDER = Path(r"G:\My Drive\Projects\Note-taking system") / "p
 
 # OpenRouter settings
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-CLAUDE_MODEL = "anthropic/claude-sonnet-4-5"  # OpenRouter model ID — adjust if needed
+CLAUDE_MODEL = "arcee-ai/trinity-large-preview:free"  # OpenRouter model ID — adjust if needed
 
 # How many days to walk back looking for a note
 MAX_LOOKBACK_DAYS = 3
