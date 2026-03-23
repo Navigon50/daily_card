@@ -37,8 +37,8 @@ jobs:
         run: |
           python generate_brief.py \
             --note fetched_note.md \
-            --projects fetched_projects.json
-
+            --projects fetched_projects.json \
+            --date 2026-03-20
       - name: Skip notice
         if: ${{ hashFiles('no_note_found') }}
         run: echo "No note found for yesterday — skipping brief generation today."
