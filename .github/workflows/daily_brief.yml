@@ -1,0 +1,44 @@
+name: Daily Brief
+
+on:
+  schedule:
+    - cron: '0 23 * * *'   # 11pm UTC = 7am SGT
+  workflow_dispatch:        # allow manual trigger from Actions tab
+
+jobs:
+  send-brief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout daily_card
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install openai certifi
+
+      - name: Fetch inputs from life-os-data
+        env:
+          LIFE_OS_DATA_TOKEN: ${{ secrets.LIFE_OS_DATA_TOKEN }}
+        run: python fetch_inputs.py
+
+      - name: Generate brief and send Telegram
+        # Only runs if fetch_inputs found a note
+        if: ${{ !hashFiles('no_note_found') }}
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python generate_brief.py \
+            --note fetched_note.md \
+            --projects fetched_projects.json
+
+      - name: Skip notice
+        if: ${{ hashFiles('no_note_found') }}
+        run: echo "No note found for yesterday — skipping brief generation today."
