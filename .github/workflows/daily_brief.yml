@@ -2,7 +2,7 @@ name: Daily Brief
 
 on:
   schedule:
-    - cron: '0 14 * * *'   # 2pm UTC = 9am AEDT
+    - cron: '0 22 * * *'   # 10pm UTC = 9am AEDT
   workflow_dispatch:        # allow manual trigger from Actions tab
 
 jobs:
