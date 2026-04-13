@@ -25,7 +25,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-
+from generate_brief_backlog_patch import get_queued_os_task
 
 # ---------------------------------------------------------------------------
 # CONFIG — edit these for your machine, or set as environment variables
@@ -273,7 +273,7 @@ def call_claude(prompt: str) -> str:
     return response.choices[0].message.content.strip()
 
 
-def send_telegram(url: str, brief: dict) -> None:
+def send_telegram(url: str, brief: dict, backlog_task: dict | None = None) -> None:
     """Send the daily brief as a loud Telegram notification."""
     import urllib.request
 
@@ -295,8 +295,9 @@ def send_telegram(url: str, brief: dict) -> None:
         f"🎯 One thing:\n  {day.get('one', '—')}\n\n"
         f"✅ Tasks:\n{task_lines}\n\n"
         f"💻 OS block: {day.get('osDetail') or day.get('os') or '—'}"
+        + (f"\n   → {backlog_task['title']}" if backlog_task else "")
+        + (f"\n   First: {backlog_task['firstAction']}" if backlog_task and backlog_task.get('firstAction') else "")
     )
-
     payload = json.dumps({
         "chat_id":    chat_id,
         "text":       message,
@@ -424,6 +425,19 @@ def main():
     if task_count != 3:
         print(f"⚠️  Warning: expected 3 tasks, got {task_count}")
 
+    # Fetch queued OS block task from backlog
+    os_domain = day_data.get("os", "")
+    backlog_task = None
+    if os_domain and os_domain != "none":
+        try:
+            backlog_task = get_queued_os_task(os_domain)
+            if backlog_task:
+                print(f"📋 Backlog task for '{os_domain}': {backlog_task['title']}")
+            else:
+                print(f"ℹ️  No backlog task queued for '{os_domain}'")
+        except Exception as e:
+            print(f"⚠️  Could not load backlog task: {e}")
+
     # --- Output ---
     print("\n✅ Brief generated successfully")
     print("="*60)
@@ -442,7 +456,7 @@ def main():
     print(url)
 
     # Send Telegram notification
-    send_telegram(url, brief)
+    send_telegram(url, brief, backlog_task)
 
 
 if __name__ == "__main__":
