@@ -953,6 +953,12 @@ function renderCard() {
             ${disguise ? `<div class="os-block-cover">Looks like: ${disguise}</div>` : ''}
           </div>
         </div>
+        ${d.osTask ? `
+        <div style="margin-top:8px;padding:10px 12px;border-radius:7px;background:${dc.bg};border:1px solid ${dc.bd}">
+          <div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:${dc.dot};margin-bottom:5px">Next up</div>
+          <div style="font-size:12px;color:var(--text);line-height:1.45;margin-bottom:${d.osTask.firstAction?'4px':'0'}">${d.osTask.title}</div>
+          ${d.osTask.firstAction ? `<div style="font-size:10px;color:var(--text3);font-style:italic">First: ${d.osTask.firstAction}</div>` : ''}
+        </div>` : ''}
       </div>
     `;
   } else {
