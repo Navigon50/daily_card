@@ -25,7 +25,7 @@ import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from generate_brief_backlog_patch import get_queued_os_task
+
 
 # ---------------------------------------------------------------------------
 # CONFIG — edit these for your machine, or set as environment variables
@@ -39,7 +39,7 @@ DEFAULT_PROCESSED_FOLDER = Path(r"G:\My Drive\Projects\Note-taking system") / "p
 
 # OpenRouter settings
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-CLAUDE_MODEL = "arcee-ai/trinity-large-preview:free"  # OpenRouter model ID — adjust if needed
+CLAUDE_MODEL = "anthropic/claude-sonnet-4-5"  # OpenRouter model ID — adjust if needed
 
 # How many days to walk back looking for a note
 MAX_LOOKBACK_DAYS = 3
@@ -59,14 +59,13 @@ def find_note_for_date(processed_folder: Path, target_date: date) -> Path | None
 
     for days_back in range(MAX_LOOKBACK_DAYS + 1):
         check_date = target_date - timedelta(days=days_back)
-        date_str = check_date.strftime("%Y%m%d")   # e.g. 20260115
-        iso_str  = check_date.strftime("%Y-%m-%d")  # e.g. 2026-01-15
+        date_str = check_date.strftime("%Y%m%d")
+        iso_str  = check_date.strftime("%Y-%m-%d")
 
         for search_dir in search_dirs:
             if not search_dir.exists():
                 continue
             for f in search_dir.glob("processed-*.md"):
-                # Match either YYYYMMDD or YYYY-MM-DD anywhere in filename
                 if date_str in f.name or iso_str in f.name:
                     if days_back > 0:
                         print(f"  ℹ️  No note for {target_date}, found note from {check_date} (walked back {days_back} day(s))")
@@ -92,8 +91,6 @@ def parse_processed_note(note_path: Path) -> dict:
 
     # Fall back to recording date from filename if LLM returned unknown
     if transcript_date == "unknown":
-        # filename pattern: processed-{transcript_date}-{recording_name}.md
-        # recording_name often contains YYYYMMDD
         date8_match = re.search(r"(\d{4})(\d{2})(\d{2})", note_path.stem)
         if date8_match:
             y, m, d_ = date8_match.groups()
@@ -109,10 +106,8 @@ def parse_processed_note(note_path: Path) -> dict:
 
     if insights_block_match:
         block = insights_block_match.group(1)
-        # Split on ### headers
         sections = re.split(r"\n### (.+)\n", block)
-        # sections = [pre, header1, body1, header2, body2, ...]
-        it = iter(sections[1:])  # skip pre-amble
+        it = iter(sections[1:])
         for header in it:
             body = next(it, "")
             key = header.strip().lower().replace(" ", "_")
@@ -156,14 +151,11 @@ def build_prompt(note_data: dict, projects: list, today: date) -> str:
         )
     projects_text = "\n".join(projects_lines)
 
-    # Shipping and stale summaries for the task algorithm section
     shipping_names = ", ".join(p["name"] for p in shipping_projects) or "none"
     stale_names    = ", ".join(p["name"] for p in stale_projects)    or "none"
 
-    # Voice note is for energy/mood context only — extract minimal signal
     insights = note_data["insights"]
-    energy_text = insights.get("energy_mood", "nothing found")
-    # Include tasks from the note only as supplementary signal, clearly labelled
+    energy_text     = insights.get("energy_mood", "nothing found")
     note_tasks_text = insights.get("tasks", "nothing found")
 
     today_str = today.isoformat()
@@ -247,6 +239,22 @@ LEISURE + LEISUREDETAIL:
     return prompt
 
 
+def load_backlog_task(os_domain: str) -> dict | None:
+    """
+    Read fetched_backlog.json (written by fetch_inputs.py) and return the
+    queued task for the given domain, or None if not available.
+    """
+    backlog_path = Path("fetched_backlog.json")
+    if not backlog_path.exists():
+        return None
+    try:
+        backlog = json.loads(backlog_path.read_text(encoding="utf-8"))
+        return backlog.get("queued", {}).get(os_domain)
+    except Exception as e:
+        print(f"⚠️  Could not read fetched_backlog.json: {e}")
+        return None
+
+
 def call_claude(prompt: str) -> str:
     """Call Claude via OpenRouter and return the raw response text."""
     try:
@@ -274,7 +282,7 @@ def call_claude(prompt: str) -> str:
 
 
 def send_telegram(url: str, brief: dict, backlog_task: dict | None = None) -> None:
-    """Send the daily brief as a loud Telegram notification."""
+    """Send the daily brief as a Telegram notification."""
     import urllib.request
 
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -289,15 +297,22 @@ def send_telegram(url: str, brief: dict, backlog_task: dict | None = None) -> No
     tasks = day.get("tasks", [])
     task_lines = "\n".join(f"  • {t['text']}" for t in tasks)
 
+    # OS block line — always show osDetail/os
+    os_line = f"💻 OS block: {day.get('osDetail') or day.get('os') or '—'}"
+    # Append queued backlog task beneath it if available
+    if backlog_task:
+        os_line += f"\n   → {backlog_task['title']}"
+        if backlog_task.get("firstAction"):
+            os_line += f"\n   First: {backlog_task['firstAction']}"
+
     message = (
         f"☀️ Good morning. Here's your day.\n\n"
         f"{energy_emoji} Energy: {day.get('energy', '—').capitalize()}\n\n"
         f"🎯 One thing:\n  {day.get('one', '—')}\n\n"
         f"✅ Tasks:\n{task_lines}\n\n"
-        f"💻 OS block: {day.get('osDetail') or day.get('os') or '—'}"
-        + (f"\n   → {backlog_task['title']}" if backlog_task else "")
-        + (f"\n   First: {backlog_task['firstAction']}" if backlog_task and backlog_task.get('firstAction') else "")
+        f"{os_line}"
     )
+
     payload = json.dumps({
         "chat_id":    chat_id,
         "text":       message,
@@ -316,8 +331,6 @@ def send_telegram(url: str, brief: dict, backlog_task: dict | None = None) -> No
         method="POST",
     )
 
-    # Build SSL context — use certifi if available, otherwise fall back to
-    # unverified (acceptable here since we're calling a known Telegram endpoint)
     try:
         import ssl, certifi
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
@@ -360,6 +373,10 @@ def main():
     projects_path = Path(args.projects) if args.projects else Path(
         os.environ.get("LIFE_OS_PROJECTS_PATH", DEFAULT_PROJECTS_PATH)
     )
+    # In Actions, fetch_inputs.py writes fetched_projects.json — prefer that
+    if Path("fetched_projects.json").exists():
+        projects_path = Path("fetched_projects.json")
+
     if not projects_path.exists():
         print(f"❌ projects.json not found at: {projects_path}")
         print("   Pass --projects /path/to/projects.json or set LIFE_OS_PROJECTS_PATH")
@@ -376,6 +393,10 @@ def main():
         if not note_path.exists():
             print(f"❌ Note file not found: {note_path}")
             sys.exit(1)
+    elif Path("fetched_note.md").exists():
+        # In Actions, fetch_inputs.py writes this
+        note_path = Path("fetched_note.md")
+        print(f"✅ Using fetched_note.md")
     else:
         processed_folder = Path(
             os.environ.get("LIFE_OS_PROCESSED_PATH", DEFAULT_PROCESSED_FOLDER)
@@ -415,7 +436,6 @@ def main():
         print(raw_response)
         sys.exit(1)
 
-    # Basic schema validation
     today_str = today.isoformat()
     if today_str not in brief:
         print(f"⚠️  Warning: expected key '{today_str}' not found in response. Keys: {list(brief.keys())}")
@@ -425,18 +445,20 @@ def main():
     if task_count != 3:
         print(f"⚠️  Warning: expected 3 tasks, got {task_count}")
 
-    # Fetch queued OS block task from backlog
-    os_domain = day_data.get("os", "")
+    # --- Inject queued OS block task from backlog ---
+    # fetch_inputs.py writes fetched_backlog.json; we read it here after
+    # Claude has picked the os domain, then inject the task into the payload
+    # so index.html can render it without any separate fetch.
+    os_domain    = day_data.get("os", "")
     backlog_task = None
     if os_domain and os_domain != "none":
-        try:
-            backlog_task = get_queued_os_task(os_domain)
-            if backlog_task:
-                print(f"📋 Backlog task for '{os_domain}': {backlog_task['title']}")
-            else:
-                print(f"ℹ️  No backlog task queued for '{os_domain}'")
-        except Exception as e:
-            print(f"⚠️  Could not load backlog task: {e}")
+        backlog_task = load_backlog_task(os_domain)
+        if backlog_task:
+            day_data["osTask"] = backlog_task
+            brief[today_str]   = day_data
+            print(f"📋 Backlog task injected for '{os_domain}': {backlog_task['title']}")
+        else:
+            print(f"ℹ️  No backlog task queued for '{os_domain}' — card will show domain only")
 
     # --- Output ---
     print("\n✅ Brief generated successfully")
@@ -449,7 +471,7 @@ def main():
     out_path.write_text(json.dumps(brief, indent=2), encoding="utf-8")
     print(f"\n💾 Saved to {out_path.resolve()}")
 
-    # Build pre-populated URL
+    # Build pre-populated URL (osTask is already inside brief/day_data)
     encoded = base64.b64encode(json.dumps(brief).encode()).decode()
     url = f"https://navigon50.github.io/daily_card/#{encoded}"
     print(f"\n🔗 Pre-populated URL:")
