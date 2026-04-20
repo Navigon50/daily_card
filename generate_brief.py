@@ -32,14 +32,14 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 
 # Path to your local projects.json (or set LIFE_OS_PROJECTS_PATH env var)
-DEFAULT_PROJECTS_PATH = Path(r"G:\My Drive\Projects\Note-taking system") / "projects.json"
+DEFAULT_PROJECTS_PATH = Path(r"C:\Users\Arnav Roy\Documents\Coding Projects\daily-brief") / "projects.json"
 
 # Path to processed notes folder (or set LIFE_OS_PROCESSED_PATH env var)
 DEFAULT_PROCESSED_FOLDER = Path(r"G:\My Drive\Projects\Note-taking system") / "processed"
 
 # OpenRouter settings
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-CLAUDE_MODEL = "anthropic/claude-sonnet-4-5"  # OpenRouter model ID — adjust if needed
+CLAUDE_MODEL = "arcee-ai/trinity-large-preview:free"  # OpenRouter model ID — adjust if needed
 
 # How many days to walk back looking for a note
 MAX_LOOKBACK_DAYS = 3
