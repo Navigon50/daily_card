@@ -20,7 +20,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install openai certifi
+        run: pip install certifi
 
       - name: Fetch inputs from life-os-data
         env:
@@ -28,17 +28,11 @@ jobs:
         run: python fetch_inputs.py
 
       - name: Generate brief and send Telegram
-        # Only runs if fetch_inputs found a note
-        if: ${{ !hashFiles('no_note_found') }}
         env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python generate_brief.py \
             --note fetched_note.md \
             --projects fetched_projects.json \
-            --date 2026-03-20
-      - name: Skip notice
-        if: ${{ hashFiles('no_note_found') }}
-        run: echo "No note found for yesterday — skipping brief generation today."
+            --backlog fetched_backlog.json
