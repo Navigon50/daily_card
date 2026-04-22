@@ -1,14 +1,13 @@
 """
-fetch_inputs.py — Fetch projects.json, yesterday's processed note, and backlog.json
-from life-os-data.
+fetch_inputs.py — Fetch inputs from life-os-data for daily brief generation.
 
-Used by GitHub Actions before calling generate_brief.py.
-Writes three files to the working directory:
-  - fetched_projects.json
-  - fetched_note.md
-  - fetched_backlog.json  (written as {} if backlog.json not yet in repo)
+Writes to working directory:
+  - fetched_projects.json   (always — required)
+  - fetched_backlog.json    (always — required, source of truth for tasks)
+  - fetched_note.md         (optional — used for energy level only)
 
-Exits with code 1 if no note can be found (skips brief generation that day).
+Never exits with skip. If no note is found, brief generation continues
+with energy defaulting to "medium".
 
 Environment variables:
   LIFE_OS_DATA_TOKEN   GitHub PAT with read access to life-os-data
@@ -27,7 +26,7 @@ from datetime import date, timedelta
 GITHUB_OWNER  = "Navigon50"
 GITHUB_REPO   = "life-os-data"
 NOTES_FOLDER  = "notes"
-MAX_LOOKBACK  = 3
+MAX_LOOKBACK  = 7   # wider window — processing happens end of week
 
 
 def get_ssl_context():
@@ -70,25 +69,21 @@ def fetch_projects(token: str) -> dict:
     if not item:
         raise RuntimeError("projects.json not found in life-os-data repo.")
     data = json.loads(decode_content(item))
-    print(f"   ✅ Loaded {len(data.get('projects', []))} projects.")
+    print(f"   ✅ {len(data.get('projects', []))} projects loaded.")
     return data
 
 
 def fetch_backlog(token: str) -> dict:
-    """
-    Fetch and return parsed backlog.json from life-os-data.
-    Returns an empty dict if the file does not yet exist — this is not an error,
-    it just means no tasks have been synced yet.
-    """
-    print("📦 Fetching backlog.json...")
+    """Fetch and return parsed backlog.json from life-os-data."""
+    print("📋 Fetching backlog.json...")
     item = github_get(f"/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/backlog.json", token)
     if not item:
-        print("   ℹ️  backlog.json not found in repo yet — skipping.")
-        return {}
+        print("   ⚠️  backlog.json not found — returning empty backlog.")
+        return {"queued": {}, "pending": [], "done": [], "lastUpdated": None}
     data = json.loads(decode_content(item))
     queued = data.get("queued", {})
-    filled = sum(1 for v in queued.values() if v is not None)
-    print(f"   ✅ Loaded backlog ({filled}/5 domains queued).")
+    filled = sum(1 for v in queued.values() if v)
+    print(f"   ✅ {filled}/5 domains queued.")
     return data
 
 
@@ -115,7 +110,7 @@ def find_note_for_date(filenames: list[str], target_date: date) -> str | None:
         for name in filenames:
             if date8 in name or dateiso in name:
                 if days_back > 0:
-                    print(f"   ℹ️  No note for {target_date}, using note from {check_date} ({days_back}d back)")
+                    print(f"   ℹ️  No note for {target_date} — using note from {check_date} ({days_back}d back).")
                 return name
     return None
 
@@ -141,37 +136,35 @@ def main():
     today       = date.today()
     target_date = today - timedelta(days=1)
 
-    # 1. Fetch and save projects.json
+    # 1. Fetch projects.json — required
     projects = fetch_projects(token)
     with open("fetched_projects.json", "w", encoding="utf-8") as f:
         json.dump(projects, f, indent=2)
     print("   💾 Saved fetched_projects.json")
 
-    # 2. Fetch and save backlog.json (non-blocking if missing)
-    print()
+    # 2. Fetch backlog.json — required (source of truth for tasks)
     backlog = fetch_backlog(token)
     with open("fetched_backlog.json", "w", encoding="utf-8") as f:
         json.dump(backlog, f, indent=2)
     print("   💾 Saved fetched_backlog.json")
 
-    # 3. List notes and find yesterday's
-    print(f"\n🔍 Looking for note from {target_date} in {GITHUB_OWNER}/{GITHUB_REPO}/{NOTES_FOLDER}/...")
+    # 3. Fetch yesterday's note — optional (energy context only)
+    print(f"\n🔍 Looking for note from {target_date} (optional — for energy level)...")
     filenames = list_notes(token)
-    print(f"   Found {len(filenames)} note(s) in repo.")
+    print(f"   {len(filenames)} note(s) in repo.")
 
     match = find_note_for_date(filenames, target_date)
-    if not match:
-        print(f"⚠️  No note found for {target_date} (searched {MAX_LOOKBACK} days back).")
-        print("   Skipping brief generation today.")
-        with open("no_note_found", "w") as f:
-            f.write(str(target_date))
-        sys.exit(0)
-
-    print(f"   ✅ Found: {match}")
-    content = fetch_note_content(token, match)
-    with open("fetched_note.md", "w", encoding="utf-8") as f:
-        f.write(content)
-    print("   💾 Saved fetched_note.md")
+    if match:
+        print(f"   ✅ Found: {match}")
+        content = fetch_note_content(token, match)
+        with open("fetched_note.md", "w", encoding="utf-8") as f:
+            f.write(content)
+        print("   💾 Saved fetched_note.md")
+    else:
+        print(f"   ℹ️  No note found within {MAX_LOOKBACK} days — energy will default to medium.")
+        # Write empty sentinel so generate_brief.py knows note is absent
+        with open("fetched_note.md", "w", encoding="utf-8") as f:
+            f.write("")
 
     print("\n✅ Inputs ready.")
 
