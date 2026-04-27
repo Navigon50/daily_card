@@ -69,7 +69,7 @@ def fetch_projects(token: str) -> dict:
     if not item:
         raise RuntimeError("projects.json not found in life-os-data repo.")
     data = json.loads(decode_content(item))
-    print(f"   ✅ {len(data.get('projects', []))} projects loaded.")
+    print(f"   ✅ {len(data) if isinstance(data, list) else len(data.get('projects', []))} projects loaded.")
     return data
 
 
