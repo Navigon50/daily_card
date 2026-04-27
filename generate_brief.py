@@ -304,7 +304,8 @@ def main():
 
     with open(projects_path, encoding="utf-8") as f:
         projects_data = json.load(f)
-    projects = [p for p in projects_data["projects"] if p.get("status") == "active"]
+    projects_raw = projects_data if isinstance(projects_data, list) else projects_data.get("projects", [])
+    projects = [p for p in projects_raw if p.get("active", True) and p.get("status") != "on_hold"]
     print(f"✅ {len(projects)} active projects loaded.")
 
     # ── Load backlog ────────────────────────────────────────────────────────
