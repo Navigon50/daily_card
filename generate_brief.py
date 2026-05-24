@@ -1,258 +1,343 @@
 """
-generate_brief.py — Build and deliver the daily brief.
+generate_brief.py - Build and deliver the daily brief.
 
-Tasks come directly from backlog.json queued{} — set during Sunday review.
-No LLM is used for task selection. Brief is built deterministically.
-Voice note is optional and used only for energy level.
-
-Usage:
-  python generate_brief.py                          # standard run
-  python generate_brief.py --note path/to/note.md   # supply note directly
-  python generate_brief.py --projects path/to/p.json
-  python generate_brief.py --backlog path/to/b.json
-  python generate_brief.py --dry-run                # print brief, skip Telegram
-
-Environment variables:
-  TELEGRAM_BOT_TOKEN
-  TELEGRAM_CHAT_ID
+Tasks come from backlog.json queued{} only. The script is read-only with
+respect to life-os-data: it reads fetched inputs, writes local runtime output,
+and sends a Telegram URL hash payload.
 """
 
 import argparse
 import base64
+import copy
 import json
 import os
 import re
 import ssl
 import sys
 import urllib.request
-import urllib.error
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-
-# ---------------------------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------------------------
 
 DEFAULT_PROJECTS_PATH = Path(r"G:\My Drive\Projects\Note-taking system") / "projects.json"
-DEFAULT_PROCESSED_FOLDER = Path(r"G:\My Drive\Projects\Note-taking system") / "processed"
-
-# Domain key → daily card OS chip value
 DOMAIN_TO_OS_CHIP = {
-    "creative":   "creative",
-    "financial":  "financial",
+    "creative": "creative",
+    "financial": "financial",
     "connection": "connection",
-    "growth":     "learning",
-    "health":     "none",
+    "growth": "learning",
+    "health": "none",
 }
+DOMAIN_PRIORITY = ["creative", "growth", "financial", "connection", "health"]
+DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+DEFAULT_WEEK_CONTEXT = {
+    "monday": "home",
+    "tuesday": "home",
+    "wednesday": "home",
+    "thursday": "home",
+    "friday": "home",
+}
+CONTEXT_INCOMPATIBLE = {
+    "home": {"office"},
+    "office": {"home"},
+    "mobile": {"home", "office"},
+}
+try:
+    LOCAL_TZ = ZoneInfo("Australia/Sydney")
+except Exception:
+    LOCAL_TZ = None
 
-# Ordered preference for OS block (work/personal focus domains)
-OS_DOMAIN_PRIORITY = ["creative", "growth", "financial", "connection", "health"]
 
-# ---------------------------------------------------------------------------
-
-
-def get_ssl_context():
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except ImportError:
-        return ssl.create_default_context()
+def first_sunday(year: int, month: int) -> date:
+    day = date(year, month, 1)
+    while day.weekday() != 6:
+        day += timedelta(days=1)
+    return day
 
 
-# ---------------------------------------------------------------------------
-# Note parsing — energy only
-# ---------------------------------------------------------------------------
+def sydney_offset_for_utc(utc_now: datetime) -> timedelta:
+    year = utc_now.year
+    dst_start = datetime.combine(first_sunday(year, 10), datetime.min.time()) - timedelta(hours=8)
+    dst_end = datetime.combine(first_sunday(year, 4), datetime.min.time()) - timedelta(hours=8)
+    if dst_end <= utc_now < dst_start:
+        return timedelta(hours=10)
+    return timedelta(hours=11)
+
 
 def parse_energy_from_note(note_path: Path) -> str:
-    """
-    Extract energy level from a processed note.
-    Returns 'low', 'medium', or 'high'. Defaults to 'medium' if absent or unclear.
-    """
+    """Extract energy level from a processed note, defaulting to medium."""
     if not note_path.exists() or note_path.stat().st_size == 0:
         return "medium"
 
     content = note_path.read_text(encoding="utf-8")
-
-    # Find the Energy Mood section
     match = re.search(r"### Energy Mood\s*(.*?)(?=\n### |\n## |\Z)", content, re.DOTALL)
     if not match:
         return "medium"
 
     section = match.group(1).lower()
-
-    # Look for explicit energy level bullet
     level_match = re.search(r"energy level[:\s]+(\w+)", section)
     if level_match:
         raw = level_match.group(1).lower()
-        if raw in ("low",):
+        if raw == "low":
             return "low"
-        if raw in ("high",):
+        if raw == "high":
             return "high"
         return "medium"
 
-    # Fallback: keyword scan
-    low_signals  = ["exhausted", "drained", "depleted", "cooked", "fried", "low"]
+    low_signals = ["exhausted", "drained", "depleted", "cooked", "fried", "low"]
     high_signals = ["energised", "energized", "excited", "great", "high"]
 
-    for word in low_signals:
-        if word in section:
-            return "low"
-    for word in high_signals:
-        if word in section:
-            return "high"
-
+    if any(word in section for word in low_signals):
+        return "low"
+    if any(word in section for word in high_signals):
+        return "high"
     return "medium"
 
 
-# ---------------------------------------------------------------------------
-# Brief assembly — deterministic from queued{}
-# ---------------------------------------------------------------------------
-
 def sanitise(text: str) -> str:
-    """Strip potential prompt injection content and enforce length cap."""
-    text = text.strip()[:200]
-    text = re.sub(r'(?i)(ignore|system prompt|instruction|<\|)[\s:]*', '', text)
-    return text
+    """Strip prompt-like fragments and cap text length for the card."""
+    text = str(text or "").strip()[:200]
+    return re.sub(r"(?i)(ignore|system prompt|instruction|<\|)[\s:]*", "", text)
 
 
-def build_brief(queued: dict, projects: list, energy: str, today: date) -> dict:
-    """
-    Build the daily card JSON deterministically from queued tasks.
+def display_text(task: dict) -> str:
+    first = sanitise(task.get("firstAction", ""))
+    title = sanitise(task.get("title", ""))
+    return first if first and len(first) > 10 else title
 
-    queued: dict of domain → task object (or None), from backlog.json
-    projects: list of project objects from projects.json
-    energy: 'low'|'medium'|'high'
-    today: date object
-    """
-    today_str = today.isoformat()
 
-    # Index projects by name for shipping_this_week lookup
-    shipping_project_names = {
-        p["name"].lower() for p in projects
-        if p.get("status") == "active" and p.get("shipping_this_week")
+def load_projects(projects_path: Path) -> list[dict]:
+    with open(projects_path, encoding="utf-8") as f:
+        data = json.load(f)
+    projects_raw = data if isinstance(data, list) else data.get("projects", [])
+    return [
+        p for p in projects_raw
+        if p.get("active", True) and p.get("status") != "on_hold"
+    ]
+
+
+def is_compatible(task: dict, day_context: str) -> bool:
+    task_contexts = set(task.get("context") or [])
+    if not task_contexts:
+        return True
+    incompatible_with_day = CONTEXT_INCOMPATIBLE.get(day_context, set())
+    return not task_contexts.intersection(incompatible_with_day)
+
+
+def get_day_context(backlog: dict, today: date) -> str:
+    if today.weekday() >= 5:
+        return "home"
+    week_context = {**DEFAULT_WEEK_CONTEXT, **(backlog.get("weekContext") or {})}
+    day_name = DAY_NAMES[today.weekday()]
+    day_context = week_context.get(day_name, "home")
+    return day_context if day_context in {"home", "office", "mobile"} else "home"
+
+
+def sort_tasks(queued: dict, day_context: str, projects: list[dict]) -> list[tuple[str, dict]]:
+    shipping_names = {
+        sanitise(p.get("name", "")).lower()
+        for p in projects
+        if p.get("shipping_this_week")
     }
+    shipping_names.discard("")
 
-    # Collect all queued tasks (non-null), preserving domain
-    queued_tasks = [
+    def is_shipping(task: dict) -> bool:
+        title = sanitise(task.get("title", "")).lower()
+        return any(name in title or title in name for name in shipping_names)
+
+    def sort_key(item: tuple[str, dict]) -> tuple[int, int, int]:
+        domain, task = item
+        compatible = 0 if is_compatible(task, day_context) else 1
+        shipping = 0 if is_shipping(task) else 1
+        domain_rank = DOMAIN_PRIORITY.index(domain) if domain in DOMAIN_PRIORITY else 99
+        return compatible, shipping, domain_rank
+
+    all_queued = [
         (domain, task)
         for domain, task in queued.items()
         if task and isinstance(task, dict)
     ]
+    return sorted(all_queued, key=sort_key)
 
-    if not queued_tasks:
-        # No tasks queued — send a nudge brief
+
+def weekday_index(today: date) -> int:
+    epoch = date(2026, 1, 5)
+    total = 0
+    current = epoch
+    while current < today:
+        if current.weekday() < 5:
+            total += 1
+        current += timedelta(days=1)
+    return total
+
+
+def rotate_items(items: list[tuple[str, dict]], offset: int) -> list[tuple[str, dict]]:
+    if not items:
+        return []
+    offset %= len(items)
+    return items[offset:] + items[:offset]
+
+
+def rotate_tasks_for_day(
+    sorted_tasks: list[tuple[str, dict]],
+    day_context: str,
+    today: date,
+) -> list[tuple[str, dict]]:
+    rotation = weekday_index(today)
+    compatible = [
+        (domain, task)
+        for domain, task in sorted_tasks
+        if is_compatible(task, day_context)
+    ]
+    incompatible = [
+        (domain, task)
+        for domain, task in sorted_tasks
+        if not is_compatible(task, day_context)
+    ]
+    return rotate_items(compatible, rotation) + rotate_items(incompatible, rotation)
+
+
+def get_one_thing(rotated_tasks: list[tuple[str, dict]]) -> tuple[str | None, dict | None]:
+    if not rotated_tasks:
+        return None, None
+    return rotated_tasks[0]
+
+
+def build_task_slots(rotated_tasks: list[tuple[str, dict]]) -> list[tuple[str, dict] | None]:
+    slots: list[tuple[str, dict] | None] = list(rotated_tasks[:3])
+    while len(slots) < 3:
+        slots.append(None)
+    return slots
+
+
+def build_tasks(task_slots: list[tuple[str, dict] | None]) -> list[dict]:
+    tasks = []
+    for slot in task_slots:
+        if not slot:
+            tasks.append({"text": "Review and queue a task for this domain", "done": False})
+            continue
+        _, task = slot
+        tasks.append({"text": display_text(task), "done": False})
+    return tasks
+
+
+def build_task_map(task_slots: list[tuple[str, dict] | None]) -> list[dict | None]:
+    task_map = []
+    for slot in task_slots:
+        if not slot:
+            task_map.append(None)
+            continue
+        domain, task = slot
+        task_map.append({
+            "domain": domain,
+            "taskId": task.get("id", ""),
+            "title": sanitise(task.get("title", "")),
+        })
+    return task_map
+
+
+def choose_os_task(sorted_tasks: list[tuple[str, dict]], day_context: str) -> tuple[str, str, dict | None]:
+    for preferred_domain in DOMAIN_PRIORITY:
+        for domain, task in sorted_tasks:
+            if domain == preferred_domain and is_compatible(task, day_context):
+                os_task = {
+                    "id": task.get("id", ""),
+                    "title": sanitise(task.get("title", "")),
+                    "firstAction": sanitise(task.get("firstAction", "")),
+                }
+                return (
+                    DOMAIN_TO_OS_CHIP.get(domain, "none"),
+                    display_text(task),
+                    os_task,
+                )
+    return "none", "", None
+
+
+def build_brief(backlog: dict, projects: list[dict], energy: str, today: date) -> dict:
+    today_str = today.isoformat()
+    queued = backlog.get("queued", {})
+    day_context = get_day_context(backlog, today)
+    sorted_tasks = sort_tasks(queued, day_context, projects)
+    rotated_tasks = rotate_tasks_for_day(sorted_tasks, day_context, today)
+    task_slots = build_task_slots(rotated_tasks)
+    write_token = os.environ.get("BACKLOG_WRITE_TOKEN", "")
+
+    if not sorted_tasks:
         return {
             today_str: {
                 "energy": energy,
-                "one": "No tasks queued — open domain backlog and queue this week's tasks.",
-                "tasks": [
-                    {"text": "Open domain backlog and queue one task per domain", "done": False},
-                    {"text": "Review projects and update shipping_this_week flags", "done": False},
-                    {"text": "Push updated backlog to GitHub", "done": False},
-                ],
+                "one": "No tasks queued - open domain backlog and queue this week's tasks.",
+                "tasks": build_tasks(task_slots),
                 "os": "none",
-                "osDetail": "Sunday review needed — backlog is empty.",
+                "osDetail": "Sunday review needed - backlog is empty.",
+                "osTask": None,
                 "leisure": "",
                 "leisureDetail": "",
-            }
+            },
+            "_meta": {
+                "writeToken": write_token,
+                "taskMap": build_task_map(task_slots),
+            },
         }
 
-    # ── Sort tasks by priority ──────────────────────────────────────────────
-    # Priority order:
-    # 1. Linked to a shipping_this_week project (by matching task title keywords)
-    # 2. Domain order: creative > growth > financial > connection > health
-    def task_priority(item):
-        domain, task = item
-        title_lower = sanitise(task.get("title", "")).lower()
-        is_shipping = any(
-            proj_name in title_lower or title_lower in proj_name
-            for proj_name in shipping_project_names
-        )
-        domain_rank = OS_DOMAIN_PRIORITY.index(domain) if domain in OS_DOMAIN_PRIORITY else 99
-        return (0 if is_shipping else 1, domain_rank)
-
-    queued_tasks.sort(key=task_priority)
-
-    # ── Build tasks list (up to 3) ──────────────────────────────────────────
-    tasks = []
-    for domain, task in queued_tasks[:3]:
-        title = sanitise(task.get("title", ""))
-        first = sanitise(task.get("firstAction", ""))
-        # Use firstAction as the card task text if it's more specific
-        task_text = first if first and len(first) > 10 else title
-        tasks.append({"text": task_text, "done": False})
-
-    # Pad to 3 if fewer than 3 domains are queued
-    while len(tasks) < 3:
-        tasks.append({"text": "Review and queue a task for this domain", "done": False})
-
-    # ── One thing — highest priority task ──────────────────────────────────
-    top_domain, top_task = queued_tasks[0]
-    top_title  = sanitise(top_task.get("title", ""))
-    top_first  = sanitise(top_task.get("firstAction", ""))
-    one = top_first if top_first and len(top_first) > 10 else top_title
-
-    # ── OS block — first queued task in a work-relevant domain ─────────────
-    os_chip    = "none"
-    os_detail  = ""
-
-    for domain in OS_DOMAIN_PRIORITY:
-        task_obj = queued.get(domain)
-        if task_obj and isinstance(task_obj, dict):
-            os_chip   = DOMAIN_TO_OS_CHIP.get(domain, "none")
-            os_detail = sanitise(task_obj.get("firstAction", "") or task_obj.get("title", ""))
-            break
+    _, one_task = get_one_thing(rotated_tasks)
+    one_text = display_text(one_task) if one_task else ""
+    os_chip, os_detail, os_task = choose_os_task(sorted_tasks, day_context)
 
     return {
         today_str: {
-            "energy":        energy,
-            "one":           one,
-            "tasks":         tasks,
-            "os":            os_chip,
-            "osDetail":      os_detail,
-            "leisure":       "",
+            "energy": energy,
+            "one": one_text,
+            "tasks": build_tasks(task_slots),
+            "os": os_chip,
+            "osDetail": os_detail,
+            "osTask": os_task,
+            "leisure": "",
             "leisureDetail": "",
-        }
+        },
+        "_meta": {
+            "writeToken": write_token,
+            "taskMap": build_task_map(task_slots),
+        },
     }
 
 
-# ---------------------------------------------------------------------------
-# Telegram delivery
-# ---------------------------------------------------------------------------
+def redacted_payload(payload: dict) -> dict:
+    redacted = copy.deepcopy(payload)
+    if redacted.get("_meta", {}).get("writeToken"):
+        redacted["_meta"]["writeToken"] = "[redacted]"
+    return redacted
 
-def send_telegram(url: str, brief: dict) -> None:
-    """Send the daily brief as a Telegram notification with inline button."""
+
+def encode_payload(payload: dict) -> str:
+    return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+
+def send_telegram(url: str, brief: dict, today_str: str) -> None:
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id   = os.environ.get("TELEGRAM_CHAT_ID")
-
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
     if not bot_token or not chat_id:
-        print("⚠️  TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set — skipping delivery.")
+        print("TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID not set - skipping delivery.")
         return
 
-    day = list(brief.values())[0]
-    energy_emoji = {"high": "⚡", "medium": "🟡", "low": "🔵"}.get(day.get("energy", ""), "•")
+    day = brief[today_str]
     tasks = day.get("tasks", [])
-    task_lines = "\n".join(f"  • {t['text']}" for t in tasks)
-
+    task_lines = "\n".join(f"  - {t['text']}" for t in tasks)
     message = (
-        f"☀️ Good morning. Here's your day.\n\n"
-        f"{energy_emoji} Energy: {day.get('energy', '—').capitalize()}\n\n"
-        f"🎯 One thing:\n  {day.get('one', '—')}\n\n"
-        f"✅ Tasks:\n{task_lines}\n\n"
-        f"💻 OS block: {day.get('osDetail') or day.get('os') or '—'}"
+        "Good morning. Here's your day.\n\n"
+        f"Energy: {day.get('energy', '-').capitalize()}\n\n"
+        f"One thing:\n  {day.get('one', '-')}\n\n"
+        f"Tasks:\n{task_lines}\n\n"
+        f"OS block: {day.get('osDetail') or day.get('os') or '-'}"
     )
-
     payload = json.dumps({
-        "chat_id":                  chat_id,
-        "text":                     message,
+        "chat_id": chat_id,
+        "text": message,
         "disable_web_page_preview": True,
         "reply_markup": json.dumps({
-            "inline_keyboard": [[
-                {"text": "📋 Open daily card", "url": url}
-            ]]
-        })
-    }).encode()
+            "inline_keyboard": [[{"text": "Open daily card", "url": url}]]
+        }),
+    }).encode("utf-8")
 
     req = urllib.request.Request(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
@@ -266,96 +351,108 @@ def send_telegram(url: str, brief: dict) -> None:
         ssl_ctx = ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
 
     try:
         with urllib.request.urlopen(req, timeout=10, context=ssl_ctx) as resp:
             result = json.loads(resp.read())
             if result.get("ok"):
-                print("📨 Telegram notification sent.")
+                print("Telegram notification sent.")
             else:
-                print(f"⚠️  Telegram API error: {result}")
-    except Exception as e:
-        print(f"❌ Telegram delivery failed: {e}")
+                print(f"Telegram API error: {result}")
+    except Exception as exc:
+        print(f"Telegram delivery failed: {exc}")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def local_now() -> datetime:
+    if LOCAL_TZ:
+        return datetime.now(LOCAL_TZ)
+    utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return utc_now + sydney_offset_for_utc(utc_now)
 
-def main():
+
+def resolve_today(date_arg: str | None) -> date:
+    if date_arg:
+        return date.fromisoformat(date_arg)
+    return local_now().date()
+
+
+def should_send_now(date_arg: str | None, dry_run: bool) -> bool:
+    if date_arg or dry_run:
+        return True
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        return True
+    now = local_now()
+    return now.weekday() < 5 and now.hour == 7
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(description="Generate and deliver daily brief")
-    parser.add_argument("--note",     help="Path to processed note .md (optional, for energy)")
+    parser.add_argument("--note", help="Path to processed note .md")
     parser.add_argument("--projects", help="Path to projects.json")
-    parser.add_argument("--backlog",  help="Path to backlog.json (fetched_backlog.json)")
-    parser.add_argument("--dry-run",  action="store_true", help="Print brief, skip Telegram")
+    parser.add_argument("--backlog", help="Path to backlog.json")
+    parser.add_argument("--date", help="Override local date for deterministic tests (YYYY-MM-DD)")
+    parser.add_argument("--dry-run", action="store_true", help="Print redacted brief and skip Telegram")
     args = parser.parse_args()
 
-    today = date.today()
+    today = resolve_today(args.date)
+    today_str = today.isoformat()
 
-    # ── Load projects ───────────────────────────────────────────────────────
     projects_path = Path(args.projects) if args.projects else Path(
         os.environ.get("LIFE_OS_PROJECTS_PATH", DEFAULT_PROJECTS_PATH)
     )
     if not projects_path.exists():
-        print(f"❌ projects.json not found at: {projects_path}")
+        print(f"projects.json not found at: {projects_path}")
         sys.exit(1)
+    projects = load_projects(projects_path)
+    print(f"{len(projects)} active projects loaded.")
 
-    with open(projects_path, encoding="utf-8") as f:
-        projects_data = json.load(f)
-    projects_raw = projects_data if isinstance(projects_data, list) else projects_data.get("projects", [])
-    projects = [p for p in projects_raw if p.get("active", True) and p.get("status") != "on_hold"]
-    print(f"✅ {len(projects)} active projects loaded.")
-
-    # ── Load backlog ────────────────────────────────────────────────────────
     backlog_path = Path(args.backlog) if args.backlog else Path("fetched_backlog.json")
     if not backlog_path.exists():
-        print(f"❌ backlog not found at: {backlog_path}")
-        print("   Run fetch_inputs.py first, or pass --backlog path/to/backlog.json")
+        print(f"backlog not found at: {backlog_path}")
+        print("Run fetch_inputs.py first, or pass --backlog path/to/backlog.json")
         sys.exit(1)
-
     with open(backlog_path, encoding="utf-8") as f:
-        backlog_data = json.load(f)
+        backlog = json.load(f)
 
-    queued = backlog_data.get("queued", {})
-    filled = sum(1 for v in queued.values() if v)
-    print(f"✅ Backlog loaded — {filled}/5 domains queued.")
+    queued = backlog.get("queued", {})
+    filled = sum(1 for value in queued.values() if value)
+    print(f"Backlog loaded - {filled}/5 domains queued.")
+    print(f"Day context: {get_day_context(backlog, today)} ({today_str})")
+    print(f"Weekday rotation index: {weekday_index(today)}")
 
-    if filled == 0:
-        print("⚠️  No tasks queued — brief will prompt for Sunday review.")
-
-    # ── Parse energy from note ──────────────────────────────────────────────
     note_path = Path(args.note) if args.note else Path("fetched_note.md")
     energy = parse_energy_from_note(note_path)
-    note_source = f"from {note_path.name}" if note_path.exists() and note_path.stat().st_size > 0 else "no note — defaulting"
-    print(f"✅ Energy: {energy} ({note_source})")
+    print(f"Energy: {energy}")
 
-    # ── Build brief ─────────────────────────────────────────────────────────
-    brief = build_brief(queued, projects, energy, today)
+    brief = build_brief(backlog, projects, energy, today)
+    redacted = redacted_payload(brief)
 
-    print("\n✅ Brief assembled:")
+    print("\nBrief assembled:")
     print("=" * 60)
-    print(json.dumps(brief, indent=2))
+    print(json.dumps(redacted, indent=2))
     print("=" * 60)
 
-    # ── Save ────────────────────────────────────────────────────────────────
     out_path = Path("brief_output.json")
-    out_path.write_text(json.dumps(brief, indent=2), encoding="utf-8")
-    print(f"\n💾 Saved to {out_path}")
+    out_path.write_text(json.dumps(redacted, indent=2), encoding="utf-8")
+    print(f"Saved redacted runtime output to {out_path}")
 
-    # ── Build URL ───────────────────────────────────────────────────────────
-    encoded = base64.b64encode(json.dumps(brief).encode()).decode()
+    encoded = encode_payload(brief)
     url = f"https://navigon50.github.io/daily_card/#{encoded}"
-    print(f"\n🔗 Pre-populated URL:")
-    print(url)
+    if os.environ.get("BACKLOG_WRITE_TOKEN"):
+        print("Pre-populated URL generated. Hidden because BACKLOG_WRITE_TOKEN is present.")
+    else:
+        print("\nPre-populated URL:")
+        print(url)
 
     if args.dry_run:
         print("\n[dry-run] Skipping Telegram.")
         return
 
-    # ── Send ────────────────────────────────────────────────────────────────
-    send_telegram(url, brief)
+    if not should_send_now(args.date, args.dry_run):
+        print("Outside Australia/Sydney weekday 7am window - skipping delivery.")
+        return
+
+    send_telegram(url, brief, today_str)
 
 
 if __name__ == "__main__":

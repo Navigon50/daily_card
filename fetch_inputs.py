@@ -21,11 +21,46 @@ import ssl
 import urllib.request
 import urllib.error
 import urllib.parse
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 GITHUB_OWNER  = "Navigon50"
 GITHUB_REPO   = "life-os-data"
 NOTES_FOLDER  = "notes"
+try:
+    LOCAL_TZ = ZoneInfo("Australia/Sydney")
+except Exception:
+    LOCAL_TZ = None
+DEFAULT_WEEK_CONTEXT = {
+    "monday": "home",
+    "tuesday": "home",
+    "wednesday": "home",
+    "thursday": "home",
+    "friday": "home",
+}
+
+
+def first_sunday(year: int, month: int) -> date:
+    day = date(year, month, 1)
+    while day.weekday() != 6:
+        day += timedelta(days=1)
+    return day
+
+
+def sydney_offset_for_utc(utc_now: datetime) -> timedelta:
+    year = utc_now.year
+    dst_start = datetime.combine(first_sunday(year, 10), datetime.min.time()) - timedelta(hours=8)
+    dst_end = datetime.combine(first_sunday(year, 4), datetime.min.time()) - timedelta(hours=8)
+    if dst_end <= utc_now < dst_start:
+        return timedelta(hours=10)
+    return timedelta(hours=11)
+
+
+def local_today() -> date:
+    if LOCAL_TZ:
+        return datetime.now(LOCAL_TZ).date()
+    utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return (utc_now + sydney_offset_for_utc(utc_now)).date()
 MAX_LOOKBACK  = 7   # wider window — processing happens end of week
 
 
@@ -69,7 +104,7 @@ def fetch_projects(token: str) -> dict:
     if not item:
         raise RuntimeError("projects.json not found in life-os-data repo.")
     data = json.loads(decode_content(item))
-    print(f"   ✅ {len(data) if isinstance(data, list) else len(data.get('projects', []))} projects loaded.")
+    print(f"   ✅ {len(data.get('projects', []))} projects loaded.")
     return data
 
 
@@ -79,7 +114,13 @@ def fetch_backlog(token: str) -> dict:
     item = github_get(f"/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/backlog.json", token)
     if not item:
         print("   ⚠️  backlog.json not found — returning empty backlog.")
-        return {"queued": {}, "pending": [], "done": [], "lastUpdated": None}
+        return {
+            "queued": {},
+            "pending": [],
+            "done": [],
+            "weekContext": DEFAULT_WEEK_CONTEXT,
+            "lastUpdated": None,
+        }
     data = json.loads(decode_content(item))
     queued = data.get("queued", {})
     filled = sum(1 for v in queued.values() if v)
@@ -133,7 +174,7 @@ def main():
         print("❌ LIFE_OS_DATA_TOKEN not set.")
         sys.exit(1)
 
-    today       = date.today()
+    today       = local_today()
     target_date = today - timedelta(days=1)
 
     # 1. Fetch projects.json — required

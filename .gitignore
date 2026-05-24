@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+brief_output.json
+fetched_projects.json
+fetched_backlog.json
+fetched_note.md

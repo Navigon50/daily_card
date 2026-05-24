@@ -2,7 +2,8 @@ name: Daily Brief
 
 on:
   schedule:
-    - cron: '0 22 * * *'   # 10pm UTC = 9am AEDT
+    - cron: '0 20 * * 0-4'  # 7am AEDT Mon-Fri local
+    - cron: '0 21 * * 0-4'  # 7am AEST Mon-Fri local
   workflow_dispatch:        # allow manual trigger from Actions tab
 
 jobs:
@@ -31,6 +32,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
+          BACKLOG_WRITE_TOKEN: ${{ secrets.BACKLOG_WRITE_TOKEN }}
         run: |
           python generate_brief.py \
             --note fetched_note.md \
