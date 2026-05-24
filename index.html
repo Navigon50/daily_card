@@ -8,7 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Today">
 <link rel="manifest" href="manifest.json">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon.png">
 <title>Today</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
@@ -646,24 +646,36 @@ document.getElementById('topdate').textContent =
   new Date().toLocaleDateString('en-GB', { weekday:'short', day:'numeric', month:'short' }).toUpperCase();
 
 // ── Storage ────────────────────────────────────────────
-const DATE_KEY = new Date().toISOString().split('T')[0];
+function localDateKey() {
+  const n = new Date();
+  const y = n.getFullYear();
+  const m = String(n.getMonth() + 1).padStart(2, '0');
+  const d = String(n.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+const DATE_KEY = localDateKey();
 const STORE = 'daily_card_v1';
+let META = null;
 
 function load() {
   try {
     const hash = location.hash.slice(1);
     if (hash) {
       const decoded = JSON.parse(atob(hash));
-      if (decoded && decoded[DATE_KEY]) return decoded;
+      if (decoded && decoded[DATE_KEY]) {
+        if (decoded._meta) META = decoded._meta;
+        return { [DATE_KEY]: decoded[DATE_KEY] };
+      }
     }
   } catch(e) {}
   return JSON.parse(localStorage.getItem(STORE) || '{}');
 }
 
 function save(data) {
-  localStorage.setItem(STORE, JSON.stringify(data));
+  const todayOnly = { [DATE_KEY]: data[DATE_KEY] };
+  localStorage.setItem(STORE, JSON.stringify(todayOnly));
   try {
-    const todayOnly = { [DATE_KEY]: data[DATE_KEY] };
     location.hash = btoa(JSON.stringify(todayOnly));
   } catch(e) {}
 }
@@ -713,6 +725,7 @@ function toggleOffice() {
   officeMode = !officeMode;
   localStorage.setItem('office_mode', officeMode);
   applyOfficeMode();
+  renderCard();
 }
 
 function applyOfficeMode() {
@@ -723,8 +736,6 @@ function applyOfficeMode() {
   document.body.classList.toggle('office-mode', officeMode);
   const badge = document.getElementById('os-mode-badge');
   if (badge) badge.classList.toggle('show', officeMode);
-  // Update OS block label in card
-  renderCard();
 }
 
 // ── Chip picker ───────────────────────────────────────
@@ -838,9 +849,66 @@ function toggleTask(idx) {
   const all = load();
   const d = all[DATE_KEY];
   if (!d || !d.tasks) return;
-  d.tasks[idx].done = !d.tasks[idx].done;
+  const wasAlreadyDone = d.tasks[idx].done;
+  d.tasks[idx].done = !wasAlreadyDone;
   save(all);
   renderCard();
+
+  if (!wasAlreadyDone && META && META.writeToken && META.taskMap) {
+    const taskEntry = META.taskMap[idx];
+    if (taskEntry && taskEntry.domain && taskEntry.taskId) {
+      writeCompletionToBacklog(taskEntry.domain, taskEntry.taskId, META.writeToken);
+    }
+  }
+}
+
+async function writeCompletionToBacklog(domain, taskId, token) {
+  const OWNER = 'Navigon50';
+  const REPO = 'life-os-data';
+  const PATH = 'backlog.json';
+  const API = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH}`;
+  const headers = {
+    'Authorization': `Bearer ${token}`,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json',
+  };
+
+  try {
+    const getResp = await fetch(API, { headers });
+    if (!getResp.ok) {
+      console.warn('writeCompletionToBacklog: GET failed', getResp.status);
+      return;
+    }
+    const getJson = await getResp.json();
+    const backlog = JSON.parse(atob(getJson.content.replace(/\n/g, '')));
+    const queuedTask = backlog.queued && backlog.queued[domain];
+
+    if (!queuedTask || queuedTask.id !== taskId) return;
+
+    backlog.done = backlog.done || [];
+    backlog.done.push({
+      id: queuedTask.id,
+      domain: domain,
+      title: queuedTask.title,
+      completedAt: new Date().toISOString(),
+    });
+    backlog.queued[domain] = null;
+    backlog.lastUpdated = new Date().toISOString();
+
+    const body = JSON.stringify({
+      message: `complete: ${domain} task ${taskId.slice(0, 8)}`,
+      content: btoa(unescape(encodeURIComponent(JSON.stringify(backlog, null, 2)))),
+      sha: getJson.sha,
+    });
+    const putResp = await fetch(API, { method: 'PUT', headers, body });
+    if (!putResp.ok) {
+      const err = await putResp.json().catch(() => ({}));
+      console.warn('writeCompletionToBacklog: PUT failed', putResp.status, err.message);
+    }
+  } catch (e) {
+    console.warn('writeCompletionToBacklog: error', e);
+  }
 }
 
 // ── Render card ───────────────────────────────────────
@@ -1008,7 +1076,9 @@ function manualCopy() {
 // ── Service Worker + Install prompt ───────────────────
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.register('./sw.js')
+      .then(registration => registration.update())
+      .catch(() => {});
   });
 }
 
