@@ -30,6 +30,8 @@ DOMAIN_TO_OS_CHIP = {
 }
 DOMAIN_PRIORITY = ["creative", "growth", "financial", "connection", "health"]
 DAY_NAMES = ["monday", "tuesday", "wednesday", "thursday", "friday"]
+AEDT_CRON = "0 20 * * 0-4"
+AEST_CRON = "0 21 * * 0-4"
 DEFAULT_WEEK_CONTEXT = {
     "monday": "home",
     "tuesday": "home",
@@ -376,13 +378,31 @@ def resolve_today(date_arg: str | None) -> date:
     return local_now().date()
 
 
+def expected_schedule_for_local_time(now: datetime) -> str:
+    offset = now.utcoffset()
+    if offset is None:
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        offset = sydney_offset_for_utc(utc_now)
+    return AEDT_CRON if offset == timedelta(hours=11) else AEST_CRON
+
+
 def should_send_now(date_arg: str | None, dry_run: bool) -> bool:
     if date_arg or dry_run:
         return True
     if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         return True
     now = local_now()
-    return now.weekday() < 5 and now.hour == 7
+    if now.weekday() >= 5:
+        return False
+
+    if os.environ.get("GITHUB_EVENT_NAME") == "schedule":
+        actual_schedule = os.environ.get("GITHUB_EVENT_SCHEDULE", "")
+        expected_schedule = expected_schedule_for_local_time(now)
+        if actual_schedule:
+            return actual_schedule == expected_schedule
+        return 6 <= now.hour <= 9
+
+    return now.hour == 7
 
 
 def main() -> None:
@@ -443,13 +463,14 @@ def main() -> None:
     else:
         print("\nPre-populated URL:")
         print(url)
+        print("Backlog write-back token missing - task completion sync will be disabled.")
 
     if args.dry_run:
         print("\n[dry-run] Skipping Telegram.")
         return
 
     if not should_send_now(args.date, args.dry_run):
-        print("Outside Australia/Sydney weekday 7am window - skipping delivery.")
+        print("Outside the active Australia/Sydney scheduled send window - skipping delivery.")
         return
 
     send_telegram(url, brief, today_str)

@@ -33,6 +33,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID:   ${{ secrets.TELEGRAM_CHAT_ID }}
           BACKLOG_WRITE_TOKEN: ${{ secrets.BACKLOG_WRITE_TOKEN }}
+          GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: |
           python generate_brief.py \
             --note fetched_note.md \
