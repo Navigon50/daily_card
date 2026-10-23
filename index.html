@@ -656,7 +656,12 @@ function localDateKey() {
 
 const DATE_KEY = localDateKey();
 const STORE = 'daily_card_v1';
-let META = null;
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
+}
 
 function load() {
   try {
@@ -664,7 +669,6 @@ function load() {
     if (hash) {
       const decoded = JSON.parse(atob(hash));
       if (decoded && decoded[DATE_KEY]) {
-        if (decoded._meta) META = decoded._meta;
         return { [DATE_KEY]: decoded[DATE_KEY] };
       }
     }
@@ -763,7 +767,7 @@ function addEditTask(text='') {
   const list = document.getElementById('edit-task-list');
   const row = document.createElement('div');
   row.className = 'edit-task-row';
-  row.innerHTML = `<input type="text" placeholder="task…" value="${text}">
+  row.innerHTML = `<input type="text" placeholder="task…" value="${escapeHtml(text)}">
     <button class="btn-del-task" onclick="this.closest('.edit-task-row').remove()">×</button>`;
   list.appendChild(row);
 }
@@ -854,61 +858,8 @@ function toggleTask(idx) {
   save(all);
   renderCard();
 
-  if (!wasAlreadyDone && META && META.writeToken && META.taskMap) {
-    const taskEntry = META.taskMap[idx];
-    if (taskEntry && taskEntry.domain && taskEntry.taskId) {
-      writeCompletionToBacklog(taskEntry.domain, taskEntry.taskId, META.writeToken);
-    }
-  }
-}
-
-async function writeCompletionToBacklog(domain, taskId, token) {
-  const OWNER = 'Navigon50';
-  const REPO = 'life-os-data';
-  const PATH = 'backlog.json';
-  const API = `https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH}`;
-  const headers = {
-    'Authorization': `Bearer ${token}`,
-    'Accept': 'application/vnd.github+json',
-    'X-GitHub-Api-Version': '2022-11-28',
-    'Content-Type': 'application/json',
-  };
-
-  try {
-    const getResp = await fetch(API, { headers });
-    if (!getResp.ok) {
-      console.warn('writeCompletionToBacklog: GET failed', getResp.status);
-      return;
-    }
-    const getJson = await getResp.json();
-    const backlog = JSON.parse(atob(getJson.content.replace(/\n/g, '')));
-    const queuedTask = backlog.queued && backlog.queued[domain];
-
-    if (!queuedTask || queuedTask.id !== taskId) return;
-
-    backlog.done = backlog.done || [];
-    backlog.done.push({
-      id: queuedTask.id,
-      domain: domain,
-      title: queuedTask.title,
-      completedAt: new Date().toISOString(),
-    });
-    backlog.queued[domain] = null;
-    backlog.lastUpdated = new Date().toISOString();
-
-    const body = JSON.stringify({
-      message: `complete: ${domain} task ${taskId.slice(0, 8)}`,
-      content: btoa(unescape(encodeURIComponent(JSON.stringify(backlog, null, 2)))),
-      sha: getJson.sha,
-    });
-    const putResp = await fetch(API, { method: 'PUT', headers, body });
-    if (!putResp.ok) {
-      const err = await putResp.json().catch(() => ({}));
-      console.warn('writeCompletionToBacklog: PUT failed', putResp.status, err.message);
-    }
-  } catch (e) {
-    console.warn('writeCompletionToBacklog: error', e);
-  }
+  // Completion is stored locally. Do not send GitHub write credentials to this
+  // static client; use the replacement app/backend for any future sync.
 }
 
 // ── Render card ───────────────────────────────────────
@@ -972,7 +923,7 @@ function renderCard() {
   oneCard.innerHTML = `
     <div style="position:absolute;top:0;left:0;right:0;height:1.5px;background:${lineC};border-radius:12px 12px 0 0"></div>
     <p class="card-eyebrow" style="color:${eyeC};opacity:0.55">Today's one thing</p>
-    <p class="card-main">${d.one}</p>
+    <p class="card-main">${escapeHtml(d.one)}</p>
   `;
 
   // ── Tasks card ──
@@ -989,7 +940,7 @@ function renderCard() {
       d.tasks.map((t, i) => `
         <div class="task-item${t.done?' done':''}" onclick="toggleTask(${i})">
           <div class="task-box"></div>
-          <span class="task-text">${t.text}</span>
+          <span class="task-text">${escapeHtml(t.text)}</span>
         </div>
       `).join('');
   } else {
@@ -1017,15 +968,15 @@ function renderCard() {
         <div class="os-block-item" style="background:${dc.bg};border-color:${dc.bd}">
           <div class="os-block-dot" style="background:${dc.dot}"></div>
           <div class="os-block-content">
-            <div class="os-block-title">${d.osDetail || d.os}</div>
-            ${disguise ? `<div class="os-block-cover">Looks like: ${disguise}</div>` : ''}
+            <div class="os-block-title">${escapeHtml(d.osDetail || d.os)}</div>
+            ${disguise ? `<div class="os-block-cover">Looks like: ${escapeHtml(disguise)}</div>` : ''}
           </div>
         </div>
         ${d.osTask ? `
         <div style="margin-top:8px;padding:10px 12px;border-radius:7px;background:${dc.bg};border:1px solid ${dc.bd}">
           <div style="font-size:9px;letter-spacing:0.18em;text-transform:uppercase;color:${dc.dot};margin-bottom:5px">Next up</div>
-          <div style="font-size:12px;color:var(--text);line-height:1.45;margin-bottom:${d.osTask.firstAction?'4px':'0'}">${d.osTask.title}</div>
-          ${d.osTask.firstAction ? `<div style="font-size:10px;color:var(--text3);font-style:italic">First: ${d.osTask.firstAction}</div>` : ''}
+          <div style="font-size:12px;color:var(--text);line-height:1.45;margin-bottom:${d.osTask.firstAction?'4px':'0'}">${escapeHtml(d.osTask.title)}</div>
+          ${d.osTask.firstAction ? `<div style="font-size:10px;color:var(--text3);font-style:italic">First: ${escapeHtml(d.osTask.firstAction)}</div>` : ''}
         </div>` : ''}
       </div>
     `;
@@ -1045,10 +996,10 @@ function renderCard() {
     leisureCard.style.display = '';
     const icon = LEISURE_ICON[d.leisure] || 'e';
     leisureCard.innerHTML = `
-      <div class="leisure-icon">${icon}</div>
+      <div class="leisure-icon">${escapeHtml(icon)}</div>
       <div class="leisure-content">
         <p class="leisure-label">Evening leisure</p>
-        <p class="leisure-val">${d.leisureDetail || d.leisure}</p>
+        <p class="leisure-val">${escapeHtml(d.leisureDetail || d.leisure)}</p>
       </div>
     `;
   } else {
