@@ -8,7 +8,6 @@ and sends a Telegram URL hash payload.
 
 import argparse
 import base64
-import copy
 import json
 import os
 import re
@@ -223,21 +222,6 @@ def build_tasks(task_slots: list[tuple[str, dict] | None]) -> list[dict]:
     return tasks
 
 
-def build_task_map(task_slots: list[tuple[str, dict] | None]) -> list[dict | None]:
-    task_map = []
-    for slot in task_slots:
-        if not slot:
-            task_map.append(None)
-            continue
-        domain, task = slot
-        task_map.append({
-            "domain": domain,
-            "taskId": task.get("id", ""),
-            "title": sanitise(task.get("title", "")),
-        })
-    return task_map
-
-
 def choose_os_task(sorted_tasks: list[tuple[str, dict]], day_context: str) -> tuple[str, str, dict | None]:
     for preferred_domain in DOMAIN_PRIORITY:
         for domain, task in sorted_tasks:
@@ -262,32 +246,23 @@ def build_brief(backlog: dict, projects: list[dict], energy: str, today: date) -
     sorted_tasks = sort_tasks(queued, day_context, projects)
     rotated_tasks = rotate_tasks_for_day(sorted_tasks, day_context, today)
     task_slots = build_task_slots(rotated_tasks)
-    write_token = os.environ.get("BACKLOG_WRITE_TOKEN", "")
 
     if not sorted_tasks:
-        return {
-            today_str: {
-                "energy": energy,
-                "one": "No tasks queued - open domain backlog and queue this week's tasks.",
-                "tasks": build_tasks(task_slots),
-                "os": "none",
-                "osDetail": "Sunday review needed - backlog is empty.",
-                "osTask": None,
-                "leisure": "",
-                "leisureDetail": "",
-            },
-            "_meta": {
-                "writeToken": write_token,
-                "taskMap": build_task_map(task_slots),
-            },
+        day = {
+            "energy": energy,
+            "one": "No tasks queued - open domain backlog and queue this week's tasks.",
+            "tasks": build_tasks(task_slots),
+            "os": "none",
+            "osDetail": "Sunday review needed - backlog is empty.",
+            "osTask": None,
+            "leisure": "",
+            "leisureDetail": "",
         }
-
-    _, one_task = get_one_thing(rotated_tasks)
-    one_text = display_text(one_task) if one_task else ""
-    os_chip, os_detail, os_task = choose_os_task(sorted_tasks, day_context)
-
-    return {
-        today_str: {
+    else:
+        _, one_task = get_one_thing(rotated_tasks)
+        one_text = display_text(one_task) if one_task else ""
+        os_chip, os_detail, os_task = choose_os_task(sorted_tasks, day_context)
+        day = {
             "energy": energy,
             "one": one_text,
             "tasks": build_tasks(task_slots),
@@ -296,19 +271,10 @@ def build_brief(backlog: dict, projects: list[dict], energy: str, today: date) -
             "osTask": os_task,
             "leisure": "",
             "leisureDetail": "",
-        },
-        "_meta": {
-            "writeToken": write_token,
-            "taskMap": build_task_map(task_slots),
-        },
-    }
+        }
 
-
-def redacted_payload(payload: dict) -> dict:
-    redacted = copy.deepcopy(payload)
-    if redacted.get("_meta", {}).get("writeToken"):
-        redacted["_meta"]["writeToken"] = "[redacted]"
-    return redacted
+    # The static client receives display data only, never credentials or write metadata.
+    return {today_str: day}
 
 
 def encode_payload(payload: dict) -> str:
@@ -445,7 +411,7 @@ def main() -> None:
     print(f"Energy: {energy}")
 
     brief = build_brief(backlog, projects, energy, today)
-    redacted = redacted_payload(brief)
+    redacted = brief
 
     print("\nBrief assembled:")
     print("=" * 60)
@@ -458,12 +424,9 @@ def main() -> None:
 
     encoded = encode_payload(brief)
     url = f"https://navigon50.github.io/daily_card/#{encoded}"
-    if os.environ.get("BACKLOG_WRITE_TOKEN"):
-        print("Pre-populated URL generated. Hidden because BACKLOG_WRITE_TOKEN is present.")
-    else:
-        print("\nPre-populated URL:")
-        print(url)
-        print("Backlog write-back token missing - task completion sync will be disabled.")
+    print("\nPre-populated URL:")
+    print(url)
+    print("Task completion is stored locally; no GitHub write token is embedded in the URL.")
 
     if args.dry_run:
         print("\n[dry-run] Skipping Telegram.")
