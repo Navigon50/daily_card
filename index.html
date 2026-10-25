@@ -10,6 +10,9 @@
 <link rel="manifest" href="manifest.json">
 <link rel="apple-touch-icon" href="icon.png">
 <title>Today</title>
+<!-- Adapted from Life-OS Workspace/repos/daily_card/index.html (2026-10-14) for Phase 2E.
+     The card no longer holds or uses any token. Ticking here is for you only; the "✓" button in the
+     Telegram brief is what closes a task in Life OS (ADR-0034). Focus tasks are marked ★. -->
 <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -498,6 +501,7 @@ textarea::placeholder, input::placeholder { color: var(--text4); font-style: ita
   .timebar-time { font-size: 56px; }
   .card-one .card-main { font-size: 22px; }
 }
+.task-hint { font-size: 10px; color: var(--text3); font-style: italic; padding: 10px 16px 12px; line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -656,12 +660,7 @@ function localDateKey() {
 
 const DATE_KEY = localDateKey();
 const STORE = 'daily_card_v1';
-
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, char => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  })[char]);
-}
+let META = null;
 
 function load() {
   try {
@@ -669,6 +668,7 @@ function load() {
     if (hash) {
       const decoded = JSON.parse(atob(hash));
       if (decoded && decoded[DATE_KEY]) {
+        if (decoded._meta) META = decoded._meta;
         return { [DATE_KEY]: decoded[DATE_KEY] };
       }
     }
@@ -694,8 +694,8 @@ function toMarkdown(d) {
     lines.push('**Tasks:**');
     d.tasks.forEach(t => lines.push(`- [${t.done?'x':' '}] ${t.text}`));
   }
-  if (d.os && d.os !== 'none') lines.push(`**OS block:** ${d.osDetail || d.os}`);
-  if (d.leisure) lines.push(`**Leisure:** ${d.leisureDetail || d.leisure}`);
+  if (d.os && d.os !== 'none') lines.push(`**OS block:** ${escapeHtml(d.osDetail || d.os)}`);
+  if (d.leisure) lines.push(`**Leisure:** ${escapeHtml(d.leisureDetail || d.leisure)}`);
   lines.push('', `_${DATE_KEY} · ${new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'})}_`);
   return lines.join('\n');
 }
@@ -853,13 +853,15 @@ function toggleTask(idx) {
   const all = load();
   const d = all[DATE_KEY];
   if (!d || !d.tasks) return;
-  const wasAlreadyDone = d.tasks[idx].done;
-  d.tasks[idx].done = !wasAlreadyDone;
+  d.tasks[idx].done = !d.tasks[idx].done;
   save(all);
   renderCard();
+}
 
-  // Completion is stored locally. Do not send GitHub write credentials to this
-  // static client; use the replacement app/backend for any future sync.
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[char]);
 }
 
 // ── Render card ───────────────────────────────────────
@@ -936,13 +938,15 @@ function renderCard() {
   }
   if (d.tasks && d.tasks.length) {
     tasksCard.style.display = '';
-    tasksCard.innerHTML = `<div class="tasks-header">Life admin</div>` +
+    const fromBrief = d.tasks.some(t => t.role);
+    tasksCard.innerHTML = `<div class="tasks-header">${fromBrief ? 'This week\'s plan · ★ focus' : 'Life admin'}</div>` +
       d.tasks.map((t, i) => `
         <div class="task-item${t.done?' done':''}" onclick="toggleTask(${i})">
           <div class="task-box"></div>
-          <span class="task-text">${escapeHtml(t.text)}</span>
+          <span class="task-text">${t.role === 'focus' ? '★ ' : ''}${escapeHtml(t.text)}</span>
         </div>
-      `).join('');
+      `).join('') +
+      (fromBrief ? `<div class="task-hint">Ticking here is just for you. Tap ✓ in the Telegram brief to close a task in Life OS.</div>` : '');
   } else {
     tasksCard.style.display = 'none';
   }
